@@ -1,0 +1,16 @@
+# 보안 파일 및 폴더 제외
+.env
+.vscode/
+
+# 크롤러 소스 코드 및 임시 파일 제외
+*crawler*.py
+pp.py
+ttt.py
+
+# 모든 CSV 및 JSON 데이터 파일 제외
+*.csv
+*.json
+
+# 이미지 및 DB 폴더 제외
+*.png
+chroma_db/
