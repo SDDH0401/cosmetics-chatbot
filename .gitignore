@@ -6,6 +6,13 @@
 *crawler*.py
 pp.py
 ttt.py
+ragas_guide.py
+results_베이스메이크업.py 
+results_스킨케어.py
+data_processing_pipeline.py
+evaluate.py
+ingest.py
+
 
 # 모든 CSV 및 JSON 데이터 파일 제외
 *.csv
