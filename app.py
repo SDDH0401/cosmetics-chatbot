@@ -1,9 +1,7 @@
 import os
 import io
 import pickle
-import requests as req
 import streamlit as st
-from PIL import Image
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -19,10 +17,6 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_API_KEY"] = st.secrets["LANGCHAIN_API_KEY"]
 os.environ["LANGCHAIN_PROJECT"] = "OliveYoung_Cosmetics_Bot"
-
-# 네이버 API 환경변수 연동
-os.environ["NAVER_CLIENT_ID"] = st.secrets["NAVER_CLIENT_ID"]
-os.environ["NAVER_CLIENT_SECRET"] = st.secrets["NAVER_CLIENT_SECRET"]
 
 FAISS_PATH = "./faiss_db"
 DOCS_PATH = "./faiss_db/review_docs.pkl"
@@ -62,58 +56,6 @@ def expand_query(question):
         if keyword in question:
             expanded += f" {synonyms}"
     return expanded
-
-
-def get_product_image(product_name):
-    client_id = os.environ.get("NAVER_CLIENT_ID")
-    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
-    try:
-        response = req.get(
-            "https://openapi.naver.com/v1/search/image",
-            headers={
-                "X-Naver-Client-Id": client_id,
-                "X-Naver-Client-Secret": client_secret,
-            },
-            params={"query": f"{product_name} 올리브영", "display": 3, "sort": "sim"}
-        )
-        result = response.json()
-        if result.get("items"):
-            for item in result["items"]:
-                img_url = item["link"]
-                try:
-                    img_response = req.get(img_url, timeout=3)
-                    if img_response.status_code == 200:
-                        return img_response.content
-                except:
-                    continue
-    except:
-        pass
-    return None
-
-
-def get_product_shopping_info(product_name):
-    client_id = os.environ.get("NAVER_CLIENT_ID")
-    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
-    try:
-        response = req.get(
-            "https://openapi.naver.com/v1/search/shop.json",
-            headers={
-                "X-Naver-Client-Id": client_id,
-                "X-Naver-Client-Secret": client_secret,
-            },
-            params={"query": product_name, "display": 1, "sort": "sim"}
-        )
-        result = response.json()
-        if result.get("items"):
-            item = result["items"][0]
-            return {
-                "lprice": int(item.get("lprice", 0)),
-                "link": item.get("link"),
-                "title": item.get("title").replace("<b>", "").replace("</b>", "")
-            }
-    except:
-        pass
-    return None
 
 
 def rrf_merge(results, k=60):
@@ -246,10 +188,10 @@ def build_search_query(question, history):
 
 
 # ==========================================
-# Top3 이미지+가격 렌더링
+# Top3 간단 리스트 출력
 # ==========================================
 def render_product_results(answer):
-    """Top3 제품 이미지 + 최저가 렌더링"""
+    """네이버 연동을 빼고 깔끔하게 추천 대상 상품명을 요약 표기"""
     product_names = extract_product_names(answer)
     if not product_names:
         return
@@ -257,23 +199,8 @@ def render_product_results(answer):
     cols = st.columns(len(product_names))
     for idx, (col, product_name) in enumerate(zip(cols, product_names)):
         with col:
-            st.markdown(f"**{idx+1}위: {product_name}**")
-
-            img_bytes = get_product_image(product_name)
-            if img_bytes:
-                try:
-                    img = Image.open(io.BytesIO(img_bytes))
-                    st.image(img)
-                except:
-                    st.caption("이미지 없음")
-            else:
-                st.caption("이미지 없음")
-
-            shop_info = get_product_shopping_info(product_name)
-            if shop_info:
-                formatted_price = f"{shop_info['lprice']:,}원"
-                st.markdown(f"**최저가:** {formatted_price}")
-                st.markdown(f"[🛒 쇼핑 바로가기]({shop_info['link']})")
+            st.markdown(f"🏅 **{idx+1}위 추천 제품**")
+            st.info(product_name)
 
 
 # ==========================================
@@ -518,9 +445,3 @@ if submit_button and question:
 
     is_rec = True if q_type == "recommend" else False
     st.session_state.messages.append({"role": "assistant", "content": answer, "is_recommend": is_rec})
-    
-    # [들여쓰기 교정] 폼 내부에서 같은 간격으로 실행되도록 수정
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
