@@ -20,6 +20,10 @@ os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_API_KEY"] = st.secrets["LANGCHAIN_API_KEY"]
 os.environ["LANGCHAIN_PROJECT"] = "OliveYoung_Cosmetics_Bot"
 
+# 네이버 API 환경변수 연동
+os.environ["NAVER_CLIENT_ID"] = st.secrets["NAVER_CLIENT_ID"]
+os.environ["NAVER_CLIENT_SECRET"] = st.secrets["NAVER_CLIENT_SECRET"]
+
 FAISS_PATH = "./faiss_db"
 DOCS_PATH = "./faiss_db/review_docs.pkl"
 
@@ -505,8 +509,6 @@ if submit_button and question:
         elif q_type == "consult":
             answer = generate_consult(question, history)
         else:
-            # [오류 수정] full_question 대신 사용자가 직접 타이핑한 순수 question을 전달하여 
-            # 사이드바 변수로 인한 검색 오염 및 매칭 차단을 방지합니다.
             retriever = get_cached_retriever()
             search_query = build_search_query(question, history)
             expanded_question = expand_query(search_query)
@@ -517,4 +519,8 @@ if submit_button and question:
     is_rec = True if q_type == "recommend" else False
     st.session_state.messages.append({"role": "assistant", "content": answer, "is_recommend": is_rec})
     
-    st.experimental_rerun()
+    # [들여쓰기 교정] 폼 내부에서 같은 간격으로 실행되도록 수정
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
