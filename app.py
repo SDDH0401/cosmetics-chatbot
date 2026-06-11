@@ -1,7 +1,9 @@
 import os
 import io
 import pickle
+import requests as req
 import streamlit as st
+from PIL import Image
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -23,6 +25,7 @@ DOCS_PATH = "./faiss_db/review_docs.pkl"
 
 EMBEDDINGS = OpenAIEmbeddings(model="text-embedding-3-large")
 LLM = ChatOpenAI(model="gpt-4o", temperature=0)
+LLM_MINI = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # LLM only 비교용
 
 # ==========================================
 # 쿼리 확장 딕셔너리
@@ -58,6 +61,58 @@ def expand_query(question):
     return expanded
 
 
+def get_product_image(product_name):
+    client_id = os.environ.get("NAVER_CLIENT_ID")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
+    try:
+        response = req.get(
+            "https://openapi.naver.com/v1/search/image",
+            headers={
+                "X-Naver-Client-Id": client_id,
+                "X-Naver-Client-Secret": client_secret,
+            },
+            params={"query": f"{product_name} 올리브영", "display": 3, "sort": "sim"}
+        )
+        result = response.json()
+        if result.get("items"):
+            for item in result["items"]:
+                img_url = item["link"]
+                try:
+                    img_response = req.get(img_url, timeout=3)
+                    if img_response.status_code == 200:
+                        return img_response.content
+                except:
+                    continue
+    except:
+        pass
+    return None
+
+
+def get_product_shopping_info(product_name):
+    client_id = os.environ.get("NAVER_CLIENT_ID")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
+    try:
+        response = req.get(
+            "https://openapi.naver.com/v1/search/shop.json",
+            headers={
+                "X-Naver-Client-Id": client_id,
+                "X-Naver-Client-Secret": client_secret,
+            },
+            params={"query": product_name, "display": 1, "sort": "sim"}
+        )
+        result = response.json()
+        if result.get("items"):
+            item = result["items"][0]
+            return {
+                "lprice": int(item.get("lprice", 0)),
+                "link": item.get("link"),
+                "title": item.get("title").replace("<b>", "").replace("</b>", "")
+            }
+    except:
+        pass
+    return None
+
+
 def rrf_merge(results, k=60):
     rrf_scores = {}
     rrf_docs = {}
@@ -72,6 +127,7 @@ def rrf_merge(results, k=60):
     return [rrf_docs[k] for k in sorted_keys]
 
 
+@st.cache_resource
 def load_retriever():
     db = FAISS.load_local(FAISS_PATH, EMBEDDINGS, allow_dangerous_deserialization=True)
     with open(DOCS_PATH, "rb") as f:
@@ -86,18 +142,13 @@ def load_retriever():
     return hybrid | RunnableLambda(rrf_merge)
 
 
-def get_cached_retriever():
-    if "my_retriever" not in st.session_state:
-        st.session_state.my_retriever = load_retriever()
-    return st.session_state.my_retriever
-
-
 # ==========================================
-# Top3 추천 + 대화 히스토리 반영
+# [수정] Top3 추천 + 대화 히스토리 반영
 # ==========================================
 def generate_answer(question, contexts, history=None):
     context_text = "\n\n".join(contexts)
 
+    # 최근 3턴 히스토리 포맷팅
     history_text = ""
     if history:
         recent = history[-6:]  # user+assistant 쌍 기준 최대 3턴 (6개 메시지)
@@ -117,9 +168,13 @@ def generate_answer(question, contexts, history=None):
 3. 질문의 핵심 키워드(예: 토너, 선크림, 시원한 등)와 관련된 제품만 추천해.
 4. Context에 질문과 관련된 제품이 없으면 "관련 제품을 찾지 못했습니다."라고 답해.
 5. 사용자가 원하는 제형과 다른 제품은 추천하지 마.
-6. 이전 대화가 있으면 맥락을 반영해서 답변해. (예: 이전에 언급한 피부 타입, 선호 등 유지)
+6. 이전 대화가 있으면 맥락을 반영해서 답변해.
 
-답변 형식 (반드시 아래 형식 그대로):
+[중요] 반드시 아래 형식만 사용해. 다른 형식은 절대 사용하지 마.
+"추천 제품 N:" 으로 시작하는 줄과 "추천 이유 N:" 으로 시작하는 줄만 출력해.
+앞에 숫자나 bullet을 붙이지 마. 형식 외의 텍스트를 추가하지 마.
+
+출력 형식 (이 형식 그대로):
 추천 제품 1: 상품명
 추천 이유 1: 리뷰에서 확인된 근거 (1~2문장)
 
@@ -141,11 +196,19 @@ def generate_answer(question, contexts, history=None):
 [Answer]
 """
     response = LLM.invoke(prompt)
-    return response.content
+    result = response.content
+
+    # 추천 제품/이유 줄바꿈 강제 처리
+    import re
+    result = re.sub(r'(추천 제품 \d+:)', r'\n\n\1', result)
+    result = re.sub(r'(추천 이유 \d+:)', r'\n\1', result)
+    result = result.strip()
+
+    return result
 
 
 # ==========================================
-# Top3 제품명 파싱
+# [수정] Top3 제품명 파싱
 # ==========================================
 def extract_product_names(answer):
     """'추천 제품 N: 상품명' 패턴으로 최대 3개 추출"""
@@ -161,7 +224,7 @@ def extract_product_names(answer):
 
 
 # ==========================================
-# 후속 질문 감지 → 검색 쿼리 보강
+# [수정] 후속 질문 감지 → 검색 쿼리 보강
 # ==========================================
 FOLLOWUP_KEYWORDS = ["2번", "3번", "1번", "그거", "그 제품", "왜 좋아", "왜좋아", "성분", "어때", "차이", "더 알려", "자세히", "비교"]
 
@@ -175,6 +238,7 @@ def build_search_query(question, history):
         if msg["role"] == "assistant":
             names = extract_product_names(msg["content"])
             if names:
+                # "2번이 왜 좋아?" → 2번 인덱스 제품 우선, 나머지도 포함
                 if "2번" in question and len(names) >= 2:
                     primary = names[1]
                 elif "3번" in question and len(names) >= 3:
@@ -188,10 +252,10 @@ def build_search_query(question, history):
 
 
 # ==========================================
-# Top3 간단 리스트 출력
+# [수정] Top3 이미지+가격 렌더링
 # ==========================================
 def render_product_results(answer):
-    """네이버 연동을 빼고 깔끔하게 추천 대상 상품명을 요약 표기"""
+    """Top3 제품 이미지 + 최저가 렌더링"""
     product_names = extract_product_names(answer)
     if not product_names:
         return
@@ -199,8 +263,23 @@ def render_product_results(answer):
     cols = st.columns(len(product_names))
     for idx, (col, product_name) in enumerate(zip(cols, product_names)):
         with col:
-            st.markdown(f"🏅 **{idx+1}위 추천 제품**")
-            st.info(product_name)
+            st.markdown(f"**{idx+1}위: {product_name}**")
+
+            img_bytes = get_product_image(product_name)
+            if img_bytes:
+                try:
+                    img = Image.open(io.BytesIO(img_bytes))
+                    st.image(img, use_container_width=True)
+                except:
+                    st.caption("이미지 없음")
+            else:
+                st.caption("이미지 없음")
+
+            shop_info = get_product_shopping_info(product_name)
+            if shop_info:
+                formatted_price = f"{shop_info['lprice']:,}원"
+                st.markdown(f"**최저가:** {formatted_price}")
+                st.markdown(f"[🛒 쇼핑 바로가기]({shop_info['link']})")
 
 
 # ==========================================
@@ -228,12 +307,44 @@ st.markdown("""
     color: #666;
     margin-bottom: 28px;
 }
-.chat-box {
-    background-color: #fcfcfc;
-    padding: 15px;
-    border-radius: 10px;
-    border: 1px solid #eee;
-    margin-bottom: 10px;
+.product-card {
+    background: white;
+    padding: 22px;
+    border-radius: 18px;
+    border: 1px solid #ffe0ea;
+    box-shadow: 0 5px 14px rgba(0,0,0,0.05);
+    margin-bottom: 16px;
+}
+.badge {
+    display: inline-block;
+    background: #fff0f5;
+    color: #d6336c;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.product-name {
+    font-size: 22px;
+    font-weight: 800;
+    color: #222;
+}
+.info-text {
+    color: #555;
+    line-height: 1.7;
+}
+.stButton > button {
+    background: linear-gradient(135deg, #ff7aa2, #ff4f87);
+    color: white;
+    border: none;
+    border-radius: 14px;
+    font-weight: 800;
+    height: 48px;
+}
+.stButton > button:hover {
+    background: linear-gradient(135deg, #ff6694, #ff3f7b);
+    color: white;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -295,11 +406,11 @@ with st.sidebar:
                 ["상관없음", "커버력", "지속력", "매트", "세미매트", "촉촉", "밀착", "모공", "요철"]
             )
 
-    recommend_btn = st.button("✨ 화장품 추천받기")
+    recommend_btn = st.button("✨ 화장품 추천받기", use_container_width=True)
 
 
 # ==========================================
-# 추천 버튼 결과 렌더링
+# 추천 버튼
 # ==========================================
 st.subheader("✨ 맞춤 화장품 추천 ໒꒱ ‧₊˚")
 
@@ -317,16 +428,16 @@ if recommend_btn:
             query = f"{texture} 제품 중 {skin_tone} 피부톤에 {detail} 특성을 가진 제품 추천해줘."
 
         with st.spinner("추천 중..."):
-            retriever = get_cached_retriever()
+            retriever = load_retriever()
             expanded_query = expand_query(query)
             docs = retriever.invoke(expanded_query)
             contexts = [doc.page_content for doc in docs]
             answer = generate_answer(query, contexts)
 
-        with st.container():
+        with st.container(border=True):
             st.markdown("### 추천 결과")
             st.write(answer)
-            st.markdown("---")
+            st.divider()
             render_product_results(answer)
 
 
@@ -335,6 +446,7 @@ if recommend_btn:
 # ==========================================
 def classify_question(question, history):
     """few-shot LLM으로 recommend / consult / vague 분류"""
+    # 후속 질문(2번, 3번 등)은 키워드로 빠르게 처리
     if any(kw in question for kw in FOLLOWUP_KEYWORDS):
         return "recommend"
 
@@ -369,6 +481,7 @@ Q: {question} →
     return "vague"
 
 
+
 def generate_consult(question, history):
     """피부 고민 상담 전용 LLM 호출 (RAG 없음)"""
     history_text = ""
@@ -386,9 +499,9 @@ def generate_consult(question, history):
 
 규칙:
 1. 제품 추천은 절대 하지 마.
-2. 고민의 원인 설명 + 생활습관/관리법 위주로 답변해.
+2. 고민의 원인을 1~2문장으로 설명해.
 3. 공감하는 말로 시작해.
-4. 3~4문장으로 간결하게 답변해.
+4. 개선에 도움이 되는 생활습관을 번호 목록으로 5가지 구체적으로 알려줘.
 
 [이전 대화]
 {history_text if history_text else "없음"}
@@ -400,48 +513,112 @@ def generate_consult(question, history):
 
 
 # ==========================================
-# 구버전 호환성 챗봇 UI 및 로직
+# 순수 LLM 답변 (RAG 없음, 비교용)
 # ==========================================
-st.markdown("---")
+def generate_llm_only(question, q_type, history=None):
+    """RAG 없이 gpt-4o-mini 자체 지식으로만 답변 (q_type에 따라 프롬프트 분기)"""
+    history_text = ""
+    if history:
+        recent = history[-6:]
+        turns = []
+        for msg in recent:
+            role = "사용자" if msg["role"] == "user" else "AI"
+            turns.append(f"{role}: {msg['content']}")
+        history_text = "\n".join(turns)
+
+    if q_type == "recommend":
+        prompt = f"""{question}"""
+
+    else:  # consult
+        prompt = f"""아래 피부 고민에 1~2문장으로만 짧게 답변해. 제품 추천은 하지 마.
+
+{question}"""
+
+    response = LLM_MINI.invoke(prompt)
+    return response.content
+
+
+# ==========================================
+# 챗봇
+# ==========================================
+st.divider()
 st.subheader("💬 피부 상담 챗봇 𖦹°‧")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 대화 히스토리 출력 (구버전 스타일)
 for msg in st.session_state.messages:
-    role_label = "👤 **사용자**" if msg["role"] == "user" else "🤖 **CosMate AI**"
-    st.markdown(f'<div class="chat-box">{role_label}<br>{msg["content"]}</div>', unsafe_allow_html=True)
-    if msg.get("is_recommend") and msg["role"] == "assistant":
-        render_product_results(msg["content"])
+    st.chat_message(msg["role"]).write(msg["content"])
 
-# 구버전 전용 폼(Form)을 사용한 입력 처리
-with st.form(key="chat_form", clear_on_submit=True):
-    question = st.text_input("화장품이나 피부 고민에 대해 질문해보세요.", key="input_text")
-    submit_button = st.form_submit_button(label="전송")
-
-if submit_button and question:
+question = st.chat_input("화장품이나 피부 고민에 대해 질문해보세요.")
+if question:
     st.session_state.messages.append({"role": "user", "content": question})
+    st.chat_message("user").write(question)
+
+    if category == "기초제품":
+        concerns_str = ", ".join(concerns) if concerns else "없음"
+        full_question = f"[피부타입: {skin_type}, 고민: {concerns_str}, 제품종류: {texture}]\n{question}"
+    else:
+        full_question = f"[카테고리: {texture}, 피부톤: {skin_tone}, 세부정보: {detail}]\n{question}"
 
     history = st.session_state.messages[:-1]
-    q_type = classify_question(question, history)
+    q_type = classify_question(question, history)  # recommend / consult / vague
 
     with st.spinner("답변 생성 중..."):
         if q_type == "vague":
-            answer = (
+            rag_answer = (
                 "어떤 종류의 화장품을 찾으시나요? 😊\n\n"
                 "예) 선크림, 립틴트, 세럼, 클렌징오일 등\n"
                 "피부 타입(건성/지성/민감성)이나 피부 고민(건조함/모공/여드름 등)도 알려주시면 더 잘 추천해드릴 수 있어요!"
             )
+            llm_answer = None  # vague는 비교 불필요
         elif q_type == "consult":
-            answer = generate_consult(question, history)
-        else:
-            retriever = get_cached_retriever()
+            rag_answer = generate_consult(question, history)
+            llm_answer = generate_llm_only(full_question, q_type="consult", history=history)
+        else:  # recommend
+            retriever = load_retriever()
             search_query = build_search_query(question, history)
             expanded_question = expand_query(search_query)
             docs = retriever.invoke(expanded_question)
             contexts = [doc.page_content for doc in docs]
-            answer = generate_answer(question, contexts, history=history)
 
-    is_rec = True if q_type == "recommend" else False
-    st.session_state.messages.append({"role": "assistant", "content": answer, "is_recommend": is_rec})
+            # 디버깅용 - 확인 후 제거
+            with st.expander("🔍 검색된 Context 확인"):
+                for i, c in enumerate(contexts):
+                    st.write(f"**문서 {i+1}**")
+                    st.write(c)
+                    st.divider()
+
+            rag_answer = generate_answer(full_question, contexts, history=history)
+            llm_answer = generate_llm_only(full_question, q_type="recommend", history=history)
+
+    # 세션에는 RAG 답변 저장
+    st.session_state.messages.append({"role": "assistant", "content": rag_answer})
+
+    # ==========================================
+    # UI 렌더링: vague면 단일, 나머지는 2컬럼 비교
+    # ==========================================
+    if llm_answer:
+        col_rag, col_llm = st.columns(2)
+
+        with col_rag:
+            st.markdown(
+                '<div style="background:#3d5a99;color:white;padding:10px 16px;border-radius:8px;font-weight:700;font-size:15px;margin-bottom:10px;">'
+                '📚 RAG 답변 | 리뷰 데이터 기반 검색·생성'
+                '</div>',
+                unsafe_allow_html=True
+            )
+            st.chat_message("assistant").markdown(rag_answer)
+            if q_type == "recommend":
+                render_product_results(rag_answer)
+
+        with col_llm:
+            st.markdown(
+                '<div style="background:#b5451b;color:white;padding:10px 16px;border-radius:8px;font-weight:700;font-size:15px;margin-bottom:10px;">'
+                '🤖 순수 LLM 답변 | 학습 지식만 사용 (문서 검색 없음)'
+                '</div>',
+                unsafe_allow_html=True
+            )
+            st.chat_message("assistant").markdown(llm_answer)
+    else:
+        st.chat_message("assistant").markdown(rag_answer)
